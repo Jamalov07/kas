@@ -1,0 +1,258 @@
+import { Injectable } from '@nestjs/common'
+import { Prisma } from '@prisma/client'
+import { PrismaService } from '../shared/prisma'
+import {
+	SupplierPaymentCreateOneRequest,
+	SupplierPaymentDeleteOneRequest,
+	SupplierPaymentFindManyRequest,
+	SupplierPaymentFindOneRequest,
+	SupplierPaymentGetManyRequest,
+	SupplierPaymentGetOneRequest,
+	SupplierPaymentUpdateOneRequest,
+} from './interfaces'
+import { ChangeMethodEnum } from '@prisma/client'
+@Injectable()
+export class SupplierPaymentRepository {
+	private readonly prisma: PrismaService
+	constructor(prisma: PrismaService) {
+		this.prisma = prisma
+	}
+
+	private methodLineSelect = {
+		id: true,
+		type: true,
+		currencyId: true,
+		amount: true,
+		currency: { select: { id: true, name: true, symbol: true } },
+	}
+
+	private findManySharedWhere(query: SupplierPaymentFindManyRequest): Prisma.SupplierPaymentModelWhereInput {
+		return {
+			staffId: query.staffId,
+			supplierId: query.supplierId,
+			deletedAt: null,
+			OR: query.search
+				? [
+						{ supplier: { fullname: { contains: query.search, mode: Prisma.QueryMode.insensitive } } },
+						{ supplier: { phone: { contains: query.search, mode: Prisma.QueryMode.insensitive } } },
+					]
+				: undefined,
+			createdAt: { gte: query.startDate, lte: query.endDate },
+		}
+	}
+
+	private findManyRowSelect = {
+		id: true,
+		staff: { select: { id: true, fullname: true, phone: true } },
+		supplier: { select: { id: true, fullname: true, phone: true } },
+		description: true,
+		paymentMethods: { orderBy: [{ createdAt: 'desc' as const }], select: this.methodLineSelect },
+		changeMethods: { orderBy: [{ createdAt: 'desc' as const }], select: this.methodLineSelect },
+		updatedAt: true,
+		createdAt: true,
+		deletedAt: true,
+	}
+
+	async findMany(query: SupplierPaymentFindManyRequest) {
+		const where = this.findManySharedWhere(query)
+		const arrivalWhere = where as Prisma.SupplierArrivalPaymentModelWhereInput
+
+		const [standalone, arrivalLinked] = await Promise.all([
+			this.prisma.supplierPaymentModel.findMany({
+				where,
+				select: this.findManyRowSelect,
+			}),
+			this.prisma.supplierArrivalPaymentModel.findMany({
+				where: arrivalWhere,
+				select: {
+					...this.findManyRowSelect,
+					arrivalId: true,
+				},
+			}),
+		])
+
+		const merged = [...standalone.map((p) => ({ ...p, paymentSource: 'standalone' as const })), ...arrivalLinked.map((p) => ({ ...p, paymentSource: 'arrival' as const }))].sort(
+			(a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
+		)
+
+		if (query.pagination) {
+			const skip = (query.pageNumber - 1) * query.pageSize
+			return merged.slice(skip, skip + query.pageSize)
+		}
+
+		return merged
+	}
+
+	async findOne(query: SupplierPaymentFindOneRequest) {
+		const payment = await this.prisma.supplierPaymentModel.findFirst({
+			where: { id: query.id, deletedAt: null },
+			select: {
+				id: true,
+				staff: { select: { id: true, fullname: true, phone: true } },
+				supplier: { select: { id: true, fullname: true, phone: true } },
+				description: true,
+				paymentMethods: { orderBy: [{ createdAt: 'desc' as const }], select: this.methodLineSelect },
+				changeMethods: { orderBy: [{ createdAt: 'desc' as const }], select: this.methodLineSelect },
+				updatedAt: true,
+				createdAt: true,
+				deletedAt: true,
+			},
+		})
+
+		return payment
+	}
+
+	async countFindMany(query: SupplierPaymentFindManyRequest) {
+		const where = this.findManySharedWhere(query)
+		const arrivalWhere = where as Prisma.SupplierArrivalPaymentModelWhereInput
+		const [cStandalone, cArrival] = await Promise.all([this.prisma.supplierPaymentModel.count({ where }), this.prisma.supplierArrivalPaymentModel.count({ where: arrivalWhere })])
+		return cStandalone + cArrival
+	}
+
+	async getMany(query: SupplierPaymentGetManyRequest) {
+		let paginationOptions = {}
+		if (query.pagination) {
+			paginationOptions = { take: query.pageSize, skip: (query.pageNumber - 1) * query.pageSize }
+		}
+
+		const payments = await this.prisma.supplierPaymentModel.findMany({
+			where: {
+				id: { in: query.ids },
+				staffId: query.staffId,
+			},
+			include: {
+				staff: { select: { id: true, fullname: true, phone: true } },
+				supplier: { select: { id: true, fullname: true, phone: true } },
+				paymentMethods: { orderBy: [{ createdAt: 'desc' as const }], select: this.methodLineSelect },
+				changeMethods: { orderBy: [{ createdAt: 'desc' as const }], select: this.methodLineSelect },
+			},
+			...paginationOptions,
+		})
+
+		return payments
+	}
+
+	async getOne(query: SupplierPaymentGetOneRequest) {
+		const payment = await this.prisma.supplierPaymentModel.findFirst({
+			where: { id: query.id, staffId: query.staffId },
+			select: {
+				id: true,
+				supplierId: true,
+				supplier: true,
+				paymentMethods: { orderBy: [{ createdAt: 'desc' as const }], select: this.methodLineSelect },
+				changeMethods: { orderBy: [{ createdAt: 'desc' as const }], select: this.methodLineSelect },
+			},
+		})
+
+		return payment
+	}
+
+	async countGetMany(query: SupplierPaymentGetManyRequest) {
+		const count = await this.prisma.supplierPaymentModel.count({
+			where: {
+				id: { in: query.ids },
+				staffId: query.staffId,
+			},
+		})
+
+		return count
+	}
+
+	async createOne(body: SupplierPaymentCreateOneRequest) {
+		const today = new Date()
+		const dayClose = await this.prisma.dayCloseLog.findFirst({ where: { closedDate: today } })
+		let date = new Date()
+
+		if (dayClose) {
+			const tomorrow = new Date(today)
+			tomorrow.setDate(today.getDate() + 1)
+			tomorrow.setHours(0, 0, 0, 0)
+			date = tomorrow
+		}
+
+		const payment = await this.prisma.supplierPaymentModel.create({
+			data: {
+				supplierId: body.supplierId,
+				staffId: body.staffId,
+				description: body.description,
+				createdAt: dayClose ? date : undefined,
+				paymentMethods: {
+					create: body.paymentMethods.map((m) => ({
+						type: m.type as any,
+						currencyId: m.currencyId,
+						amount: m.amount,
+					})),
+				},
+				...(body.changeMethods?.length && {
+					changeMethods: {
+						create: body.changeMethods.map((m) => ({
+							type: m.type,
+							currencyId: m.currencyId,
+							amount: m.amount,
+						})),
+					},
+				}),
+			},
+			select: {
+				id: true,
+				staff: { select: { id: true, fullname: true, phone: true } },
+				supplier: { select: { id: true, fullname: true, phone: true } },
+				description: true,
+				paymentMethods: { orderBy: [{ createdAt: 'desc' as const }], select: this.methodLineSelect },
+				changeMethods: { orderBy: [{ createdAt: 'desc' as const }], select: this.methodLineSelect },
+				createdAt: true,
+				updatedAt: true,
+				deletedAt: true,
+			},
+		})
+
+		return payment
+	}
+
+	async updateOne(query: SupplierPaymentGetOneRequest, body: SupplierPaymentUpdateOneRequest) {
+		const payment = await this.prisma.supplierPaymentModel.update({
+			where: { id: query.id },
+			data: {
+				supplierId: body.supplierId,
+				description: body.description,
+				deletedAt: body.deletedAt,
+				...(body.paymentMethods !== undefined && {
+					paymentMethods: {
+						deleteMany: {},
+						create: body.paymentMethods.map((m) => ({
+							type: m.type as any,
+							currencyId: m.currencyId,
+							amount: m.amount,
+						})),
+					},
+				}),
+				...(body.changeMethods !== undefined && {
+					changeMethods: {
+						deleteMany: {},
+						create: body.changeMethods.map((m) => ({
+							type: m.type,
+							currencyId: m.currencyId,
+							amount: m.amount,
+						})),
+					},
+				}),
+			},
+			select: {
+				id: true,
+				supplierId: true,
+				supplier: { select: { id: true, fullname: true, phone: true } },
+				paymentMethods: { orderBy: [{ createdAt: 'desc' as const }], select: this.methodLineSelect },
+				changeMethods: { orderBy: [{ createdAt: 'desc' as const }], select: this.methodLineSelect },
+				createdAt: true,
+			},
+		})
+
+		return payment
+	}
+
+	async deleteOne(query: SupplierPaymentDeleteOneRequest) {
+		await this.prisma.supplierPaymentModel.delete({
+			where: { id: query.id },
+		})
+	}
+}

@@ -1,0 +1,785 @@
+import { Injectable } from '@nestjs/common'
+import { PrismaService } from '../shared/prisma'
+import {
+	StatisticsGetAllProductMVRequest,
+	StatisticsGetSellingPeriodStatsRequest,
+	ProductMVStatsTypeEnum,
+	StatisticsClientReportRequest,
+	StatisticsDashboardSummaryRequest,
+} from './interfaces'
+import { ClientReportByCurrency, ClientReportCalc, ClientReportRow, StatisticsDashboardSummaryData } from './interfaces/response.interfaces'
+import { StatsTypeEnum } from '../selling/enums'
+
+import { PriceTypeEnum, SellingStatusEnum } from '@prisma/client'
+import { convertUTCtoLocal, currencyBriefMapFromRows, extractDateParts, netDebtCrossCurrencyRows, withCurrencyBriefAmountMany } from '@common'
+import { Decimal } from '@prisma/client/runtime/library'
+import { CurrencyRepository } from '../currency'
+
+type CurrencyMap = Map<string, Decimal>
+
+interface InternalCalc {
+	selling: { count: number; priceMap: CurrencyMap; paymentCount: number; paymentMap: CurrencyMap }
+	clientPayment: { count: number; paymentMap: CurrencyMap }
+	returning: { count: number; paymentMap: CurrencyMap }
+}
+
+const PRICES_SELECT = { id: true, type: true, price: true, totalPrice: true, currencyId: true, currency: { select: { symbol: true, id: true } } }
+
+const SELLING_MV_SELECT = {
+	id: true,
+	count: true,
+	createdAt: true,
+	prices: { select: PRICES_SELECT },
+	product: { select: { id: true, name: true, createdAt: true } },
+	staff: { select: { id: true, fullname: true } },
+	selling: { select: { publicId: true, id: true, date: true, status: true, client: { select: { id: true, fullname: true, phone: true } } } },
+}
+
+const ARRIVAL_MV_SELECT = {
+	id: true,
+	count: true,
+	createdAt: true,
+	prices: { select: PRICES_SELECT },
+	product: { select: { id: true, name: true, createdAt: true } },
+	staff: { select: { id: true, fullname: true } },
+	arrival: { select: { id: true, date: true, supplier: { select: { id: true, fullname: true, phone: true } } } },
+}
+
+const RETURNING_MV_SELECT = {
+	id: true,
+	count: true,
+	createdAt: true,
+	prices: { select: PRICES_SELECT },
+	product: { select: { id: true, name: true, createdAt: true } },
+	staff: { select: { id: true, fullname: true } },
+	returning: { select: { id: true, date: true, status: true, client: { select: { id: true, fullname: true, phone: true } } } },
+}
+
+@Injectable()
+export class StatisticsRepository {
+	constructor(
+		private readonly prisma: PrismaService,
+		private readonly currencyRepository: CurrencyRepository,
+	) {}
+
+	private enrichClientReportRow(row: ClientReportRow, map: ReturnType<typeof currencyBriefMapFromRows>): ClientReportRow {
+		const enrich = (arr: Array<{ currencyId: string; amount: Decimal }>) => withCurrencyBriefAmountMany(arr, map)
+		return {
+			...row,
+			calc: {
+				selling: {
+					...row.calc.selling,
+					totalPriceByCurrency: enrich(row.calc.selling.totalPriceByCurrency),
+					paymentByCurrency: enrich(row.calc.selling.paymentByCurrency),
+				},
+				clientPayment: {
+					...row.calc.clientPayment,
+					totalByCurrency: enrich(row.calc.clientPayment.totalByCurrency),
+				},
+				returning: {
+					...row.calc.returning,
+					paymentByCurrency: enrich(row.calc.returning.paymentByCurrency),
+				},
+				debtByCurrency: enrich(row.calc.debtByCurrency),
+			},
+		}
+	}
+
+	// ─── Selling Stats ─────────────────────────────────────────────────────────
+
+	private groupTotalsByCurrency(totals: { total: Decimal; currency: { id: string; symbol: string } }[]) {
+		const map = new Map<string, { currencyId: string; symbol: string; total: Decimal }>()
+		for (const t of totals) {
+			const existing = map.get(t.currency.id)
+			if (existing) {
+				existing.total = existing.total.plus(t.total)
+			} else {
+				map.set(t.currency.id, { currencyId: t.currency.id, symbol: t.currency.symbol, total: new Decimal(t.total) })
+			}
+		}
+		return Array.from(map.values()).map((v) => ({
+			currencyId: v.currencyId,
+			total: v.total,
+			currency: { id: v.currencyId, name: '', symbol: v.symbol },
+		}))
+	}
+
+	/** Qabul qilingan sotuvlar: `selling.date` oralig‘i, faqat `selling` narxi, o‘chirilmagan hujjatlar */
+	private async getTotalsByCurrencyForPeriod(start: Date, end: Date) {
+		const prices = await this.prisma.sellingProductMVPriceModel.findMany({
+			where: {
+				type: PriceTypeEnum.selling,
+				productMV: {
+					selling: {
+						status: SellingStatusEnum.accepted,
+						deletedAt: null,
+						date: { gte: start, lte: end },
+					},
+				},
+			},
+			select: { totalPrice: true, currency: { select: { id: true, symbol: true } } },
+		})
+		return this.groupTotalsByCurrency(prices.map((p) => ({ total: p.totalPrice, currency: p.currency })))
+	}
+
+	private async getDayStats() {
+		const now = convertUTCtoLocal(new Date())
+		const extracted = extractDateParts(now)
+		const result = []
+		for (let hour = 0; hour <= now.getHours(); hour++) {
+			const start = convertUTCtoLocal(new Date(extracted.year, extracted.month, extracted.day, hour, 0, 0, 0))
+			const end = convertUTCtoLocal(new Date(extracted.year, extracted.month, extracted.day, hour, 59, 59, 999))
+			const byCurrency = await this.getTotalsByCurrencyForPeriod(start, end)
+			const s = extractDateParts(start)
+			result.push({ date: `${String(s.hour).padStart(2, '0')}:${String(s.minute).padStart(2, '0')}`, byCurrency })
+		}
+		return result
+	}
+
+	private async getWeekStats() {
+		const now = convertUTCtoLocal(new Date())
+		const extracted = extractDateParts(now)
+		const result = []
+		for (let d = 6; d >= 0; d--) {
+			const dayStart = convertUTCtoLocal(new Date(extracted.year, extracted.month, extracted.day - d, 0, 0, 0, 0))
+			const dayEnd = convertUTCtoLocal(new Date(extracted.year, extracted.month, extracted.day - d, 23, 59, 59, 999))
+			const byCurrency = await this.getTotalsByCurrencyForPeriod(dayStart, dayEnd)
+			result.push({ date: `${dayStart.getFullYear()}-${String(dayStart.getMonth() + 1).padStart(2, '0')}-${String(dayStart.getDate()).padStart(2, '0')}`, byCurrency })
+		}
+		return result
+	}
+
+	private async getMonthStats() {
+		const now = new Date()
+		const result = []
+		for (let day = 1; day <= now.getDate(); day++) {
+			const dayStart = new Date(now.getFullYear(), now.getMonth(), day, 0, 0, 0, 0)
+			const dayEnd = new Date(now.getFullYear(), now.getMonth(), day, 23, 59, 59, 999)
+			const byCurrency = await this.getTotalsByCurrencyForPeriod(dayStart, dayEnd)
+			result.push({ date: dayStart.toISOString().split('T')[0], byCurrency })
+		}
+		return result
+	}
+
+	private async getYearStats() {
+		const now = new Date()
+		const result = []
+		for (let month = 0; month < 12; month++) {
+			const monthStart = new Date(now.getFullYear(), month, 1, 0, 0, 0, 0)
+			const monthEnd = new Date(now.getFullYear(), month + 1, 0, 23, 59, 59, 999)
+			const byCurrency = await this.getTotalsByCurrencyForPeriod(monthStart, monthEnd)
+			result.push({ date: monthStart.toISOString().split('T')[0].slice(0, 7), byCurrency })
+		}
+		return result
+	}
+
+	async getSellingPeriodStats(query: StatisticsGetSellingPeriodStatsRequest) {
+		if (query.type === StatsTypeEnum.day) return this.getDayStats()
+		if (query.type === StatsTypeEnum.week) return this.getWeekStats()
+		if (query.type === StatsTypeEnum.month) return this.getMonthStats()
+		if (query.type === StatsTypeEnum.year) return this.getYearStats()
+		return this.getDayStats()
+	}
+
+	async getSellingTotalStats() {
+		const now = convertUTCtoLocal(new Date())
+		const extracted = extractDateParts(now, 'day') as { year: number; month: number; day: number }
+
+		const dailyStart = convertUTCtoLocal(new Date(extracted.year, extracted.month, extracted.day, 0, 0, 0, 0))
+		const dailyEnd = convertUTCtoLocal(new Date(extracted.year, extracted.month, extracted.day, 23, 59, 59, 999))
+
+		const weeklyStart = convertUTCtoLocal(new Date(extracted.year, extracted.month, extracted.day - 6, 0, 0, 0, 0))
+		const weeklyEnd = dailyEnd
+
+		const monthlyStart = convertUTCtoLocal(new Date(extracted.year, extracted.month, 1, 0, 0, 0, 0))
+		const monthlyEnd = dailyEnd
+
+		const yearlyStart = convertUTCtoLocal(new Date(extracted.year, 0, 1, 0, 0, 0, 0))
+		const yearlyEnd = dailyEnd
+
+		const [dailyByCurrency, weeklyByCurrency, monthlyByCurrency, yearlyByCurrency] = await Promise.all([
+			this.getTotalsByCurrencyForPeriod(dailyStart, dailyEnd),
+			this.getTotalsByCurrencyForPeriod(weeklyStart, weeklyEnd),
+			this.getTotalsByCurrencyForPeriod(monthlyStart, monthlyEnd),
+			this.getTotalsByCurrencyForPeriod(yearlyStart, yearlyEnd),
+		])
+
+		return { dailyByCurrency, weeklyByCurrency, monthlyByCurrency, yearlyByCurrency }
+	}
+
+	// ─── All Product MV (cross-module) ─────────────────────────────────────────
+
+	async findManyAllProductMV(query: StatisticsGetAllProductMVRequest) {
+		const dateFilter = { gte: query.startDate, lte: query.endDate }
+		const take = query.pagination ? query.pageSize : undefined
+		const skip = query.pagination ? (query.pageNumber - 1) * query.pageSize : undefined
+
+		if (query.type === ProductMVStatsTypeEnum.selling) {
+			const items = await this.prisma.sellingProductMVModel.findMany({
+				where: { sellingId: query.sellingId, productId: query.productId, staffId: query.staffId, createdAt: dateFilter },
+				select: SELLING_MV_SELECT,
+				orderBy: { createdAt: 'desc' },
+				take,
+				skip,
+			})
+			return items.map((i) => ({ ...i, type: ProductMVStatsTypeEnum.selling }))
+		}
+
+		if (query.type === ProductMVStatsTypeEnum.arrival) {
+			const items = await this.prisma.arrivalProductMVModel.findMany({
+				where: { arrivalId: query.arrivalId, productId: query.productId, staffId: query.staffId, createdAt: dateFilter },
+				select: ARRIVAL_MV_SELECT,
+				orderBy: { createdAt: 'desc' },
+				take,
+				skip,
+			})
+			return items.map((i) => ({ ...i, type: ProductMVStatsTypeEnum.arrival }))
+		}
+
+		if (query.type === ProductMVStatsTypeEnum.returning) {
+			const items = await this.prisma.returningProductMVModel.findMany({
+				where: { returningId: query.returningId, productId: query.productId, staffId: query.staffId, createdAt: dateFilter },
+				select: RETURNING_MV_SELECT,
+				orderBy: { createdAt: 'desc' },
+				take,
+				skip,
+			})
+			return items.map((i) => ({ ...i, type: ProductMVStatsTypeEnum.returning }))
+		}
+
+		// No type filter: query all 3 tables (accepted only) and combine
+		const [sellingItems, arrivalItems, returningItems] = await Promise.all([
+			this.prisma.sellingProductMVModel.findMany({
+				where: {
+					productId: query.productId,
+					staffId: query.staffId,
+					createdAt: dateFilter,
+					selling: { status: SellingStatusEnum.accepted },
+				},
+				select: SELLING_MV_SELECT,
+			}),
+			this.prisma.arrivalProductMVModel.findMany({
+				where: { productId: query.productId, staffId: query.staffId, createdAt: dateFilter },
+				select: ARRIVAL_MV_SELECT,
+			}),
+			this.prisma.returningProductMVModel.findMany({
+				where: {
+					productId: query.productId,
+					staffId: query.staffId,
+					createdAt: dateFilter,
+					returning: { status: SellingStatusEnum.accepted },
+				},
+				select: RETURNING_MV_SELECT,
+			}),
+		])
+
+		const combined = [
+			...sellingItems.map((i) => ({ ...i, type: ProductMVStatsTypeEnum.selling })),
+			...arrivalItems.map((i) => ({ ...i, type: ProductMVStatsTypeEnum.arrival })),
+			...returningItems.map((i) => ({ ...i, type: ProductMVStatsTypeEnum.returning })),
+		].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+
+		return combined
+	}
+
+	async findManyProductStats(query: StatisticsGetAllProductMVRequest) {
+		const dateFilter =
+			query.startDate && query.endDate
+				? {
+						createdAt: {
+							gte: query.startDate,
+							lte: query.endDate,
+						},
+					}
+				: {}
+
+		const [sellingMVs, arrivalMVs, returningMVs] = await Promise.all([
+			this.prisma.sellingProductMVModel.findMany({
+				where: {
+					productId: query.productId,
+					staffId: query.staffId,
+					selling: { status: SellingStatusEnum.accepted },
+					...dateFilter,
+				},
+				select: {
+					productId: true,
+					count: true,
+					createdAt: true,
+					product: { select: { id: true, name: true, count: true } },
+				},
+			}),
+			this.prisma.arrivalProductMVModel.findMany({
+				where: {
+					productId: query.productId,
+					staffId: query.staffId,
+					...dateFilter,
+				},
+				select: {
+					productId: true,
+					count: true,
+					createdAt: true,
+					product: { select: { id: true, name: true, count: true } },
+				},
+			}),
+			this.prisma.returningProductMVModel.findMany({
+				where: {
+					productId: query.productId,
+					staffId: query.staffId,
+					returning: { status: SellingStatusEnum.accepted },
+					...dateFilter,
+				},
+				select: {
+					productId: true,
+					count: true,
+					createdAt: true,
+					product: { select: { id: true, name: true, count: true } },
+				},
+			}),
+		])
+
+		//  1. Activities yig‘ish
+		const activities = [
+			...arrivalMVs.map((mv) => ({
+				type: 'arrival' as const,
+				productId: mv.productId,
+				count: mv.count,
+				createdAt: mv.createdAt,
+			})),
+			...returningMVs.map((mv) => ({
+				type: 'returning' as const,
+				productId: mv.productId,
+				count: mv.count,
+				createdAt: mv.createdAt,
+			})),
+			...sellingMVs.map((mv) => ({
+				type: 'selling' as const,
+				productId: mv.productId,
+				count: mv.count,
+				createdAt: mv.createdAt,
+			})),
+		]
+
+		//  2. Sort (latest first)
+		activities.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
+
+		//  3. Activities group qilish (O(n))
+		const activityMap = new Map<string, typeof activities>()
+
+		for (const activity of activities) {
+			const list = activityMap.get(activity.productId) ?? []
+			list.push(activity)
+			activityMap.set(activity.productId, list)
+		}
+
+		//  4. Product aggregation
+		const productMap = new Map<
+			string,
+			{
+				id: string
+				name: string
+				count: number
+				totalSellingCount: Decimal
+				totalArrivalCount: Decimal
+				totalReturningCount: Decimal
+				actualCount: Decimal
+			}
+		>()
+
+		function applyMV(mvs: typeof arrivalMVs, type: 'arrival' | 'selling' | 'returning') {
+			for (const mv of mvs) {
+				const entry = productMap.get(mv.productId) ?? {
+					id: mv.productId,
+					name: mv.product.name,
+					count: mv.product.count,
+					totalSellingCount: new Decimal(0),
+					totalArrivalCount: new Decimal(0),
+					totalReturningCount: new Decimal(0),
+					actualCount: new Decimal(0),
+				}
+
+				if (type === 'arrival') {
+					entry.totalArrivalCount = entry.totalArrivalCount.plus(mv.count)
+					entry.actualCount = entry.actualCount.plus(mv.count)
+				}
+
+				if (type === 'returning') {
+					entry.totalReturningCount = entry.totalReturningCount.plus(mv.count)
+					entry.actualCount = entry.actualCount.plus(mv.count)
+				}
+
+				if (type === 'selling') {
+					entry.totalSellingCount = entry.totalSellingCount.plus(mv.count)
+					entry.actualCount = entry.actualCount.minus(mv.count)
+				}
+
+				productMap.set(mv.productId, entry)
+			}
+		}
+
+		applyMV(arrivalMVs, 'arrival')
+		applyMV(returningMVs, 'returning')
+		applyMV(sellingMVs, 'selling')
+
+		//  5. Final response
+		return Array.from(productMap.values()).map((product) => ({
+			...product,
+			activities: activityMap.get(product.id) ?? [],
+		}))
+	}
+
+	async countFindManyAllProductMV(query: StatisticsGetAllProductMVRequest) {
+		if (query.type === ProductMVStatsTypeEnum.selling) {
+			return this.prisma.sellingProductMVModel.count({
+				where: { sellingId: query.sellingId, productId: query.productId, staffId: query.staffId, createdAt: { gte: query.startDate, lte: query.endDate } },
+			})
+		}
+		if (query.type === ProductMVStatsTypeEnum.arrival) {
+			return this.prisma.arrivalProductMVModel.count({
+				where: { arrivalId: query.arrivalId, productId: query.productId, staffId: query.staffId, createdAt: { gte: query.startDate, lte: query.endDate } },
+			})
+		}
+		if (query.type === ProductMVStatsTypeEnum.returning) {
+			return this.prisma.returningProductMVModel.count({
+				where: { returningId: query.returningId, productId: query.productId, staffId: query.staffId, createdAt: { gte: query.startDate, lte: query.endDate } },
+			})
+		}
+		const [s, a, r] = await Promise.all([
+			this.prisma.sellingProductMVModel.count({ where: { productId: query.productId, staffId: query.staffId, selling: { status: SellingStatusEnum.accepted } } }),
+			this.prisma.arrivalProductMVModel.count({ where: { productId: query.productId, staffId: query.staffId } }),
+			this.prisma.returningProductMVModel.count({ where: { productId: query.productId, staffId: query.staffId, returning: { status: SellingStatusEnum.accepted } } }),
+		])
+		return s + a + r
+	}
+
+	// ─── Client Report ─────────────────────────────────────────────────────────
+
+	async findManyClientReport(query: StatisticsClientReportRequest): Promise<{ data: ClientReportRow[]; totalCount?: number; pagesCount?: number; pageSize?: number }> {
+		const dateFilter = query.startDate || query.endDate ? { gte: query.startDate, lte: query.endDate } : undefined
+		const searchWhere = query.search
+			? { OR: [{ fullname: { contains: query.search, mode: 'insensitive' as const } }, { phone: { contains: query.search, mode: 'insensitive' as const } }] }
+			: {}
+
+		// 1. Get all clients (sorted by latest selling date desc)
+		const clients = await this.prisma.clientModel.findMany({
+			where: { deletedAt: null, ...searchWhere },
+			select: { id: true, fullname: true, phone: true, createdAt: true, telegram: { select: { id: true } } },
+			orderBy: { createdAt: 'desc' },
+		})
+
+		// 2. Selling stats: count + selling price totals + payment totals
+		const sellings = await this.prisma.sellingModel.findMany({
+			where: { status: SellingStatusEnum.accepted, ...(dateFilter && { date: dateFilter }) },
+			select: {
+				clientId: true,
+				products: {
+					select: {
+						prices: {
+							where: { type: 'selling' },
+							select: { currencyId: true, totalPrice: true },
+						},
+					},
+				},
+				payment: {
+					select: {
+						paymentMethods: { select: { type: true, currencyId: true, amount: true } },
+					},
+				},
+			},
+		})
+
+		// 3. Standalone client payments
+		const clientPayments = await this.prisma.clientPaymentModel.findMany({
+			where: { deletedAt: null, ...(dateFilter && { createdAt: dateFilter }) },
+			select: {
+				clientId: true,
+				paymentMethods: { select: { type: true, currencyId: true, amount: true } },
+			},
+		})
+
+		// 4. Returnings + payment totals
+		const returnings = await this.prisma.returningModel.findMany({
+			where: { status: SellingStatusEnum.accepted, ...(dateFilter && { date: dateFilter }) },
+			select: {
+				clientId: true,
+				payment: {
+					select: {
+						paymentMethods: { select: { type: true, currencyId: true, amount: true } },
+					},
+				},
+			},
+		})
+
+		// 5. Build per-client aggregation map
+		const calcMap = new Map<string, InternalCalc>()
+
+		const getCalc = (clientId: string): InternalCalc => {
+			if (!calcMap.has(clientId)) {
+				calcMap.set(clientId, {
+					selling: { count: 0, priceMap: new Map(), paymentCount: 0, paymentMap: new Map() },
+					clientPayment: { count: 0, paymentMap: new Map() },
+					returning: { count: 0, paymentMap: new Map() },
+				})
+			}
+			return calcMap.get(clientId)
+		}
+
+		const addToCurrencyMap = (map: CurrencyMap, currencyId: string, amount: Decimal) => {
+			map.set(currencyId, (map.get(currencyId) ?? new Decimal(0)).plus(amount))
+		}
+
+		for (const sel of sellings) {
+			const c = getCalc(sel.clientId)
+			c.selling.count += 1
+			for (const product of sel.products) {
+				for (const price of product.prices) {
+					addToCurrencyMap(c.selling.priceMap, price.currencyId, price.totalPrice)
+				}
+			}
+			if (sel.payment) {
+				c.selling.paymentCount += 1
+				for (const method of sel.payment.paymentMethods) {
+					addToCurrencyMap(c.selling.paymentMap, method.currencyId, method.amount)
+				}
+			}
+		}
+
+		for (const payment of clientPayments) {
+			const c = getCalc(payment.clientId)
+			c.clientPayment.count += 1
+			for (const method of payment.paymentMethods) {
+				addToCurrencyMap(c.clientPayment.paymentMap, method.currencyId, method.amount)
+			}
+		}
+
+		for (const returning of returnings) {
+			const c = getCalc(returning.clientId)
+			c.returning.count += 1
+			if (returning.payment) {
+				for (const method of returning.payment.paymentMethods) {
+					addToCurrencyMap(c.returning.paymentMap, method.currencyId, method.amount)
+				}
+			}
+		}
+
+		// 6. Convert to response rows (currency filled properly in step 7)
+		const toArr = (map: CurrencyMap): ClientReportByCurrency[] =>
+			Array.from(map.entries()).map(([currencyId, amount]) => ({
+				currencyId,
+				amount,
+				currency: { id: currencyId, name: '', symbol: '' },
+			}))
+
+		const rows: ClientReportRow[] = clients.map((client) => {
+			const raw = calcMap.get(client.id)
+			if (!raw) {
+				return {
+					...client,
+					calc: {
+						selling: { count: 0, totalPriceByCurrency: [], paymentCount: 0, paymentByCurrency: [] },
+						clientPayment: { count: 0, totalByCurrency: [] },
+						returning: { count: 0, paymentByCurrency: [] },
+						debtByCurrency: [],
+					},
+				}
+			}
+
+			// debt = sellingTotal - sellingPayment - clientPayment + returningPayment
+			const debtMap = new Map<string, Decimal>()
+			for (const [cId, v] of raw.selling.priceMap) debtMap.set(cId, (debtMap.get(cId) ?? new Decimal(0)).plus(v))
+			for (const [cId, v] of raw.selling.paymentMap) debtMap.set(cId, (debtMap.get(cId) ?? new Decimal(0)).minus(v))
+			for (const [cId, v] of raw.clientPayment.paymentMap) debtMap.set(cId, (debtMap.get(cId) ?? new Decimal(0)).minus(v))
+			for (const [cId, v] of raw.returning.paymentMap) debtMap.set(cId, (debtMap.get(cId) ?? new Decimal(0)).minus(v))
+
+			const calc: ClientReportCalc = {
+				selling: {
+					count: raw.selling.count,
+					totalPriceByCurrency: toArr(raw.selling.priceMap),
+					paymentCount: raw.selling.paymentCount,
+					paymentByCurrency: toArr(raw.selling.paymentMap),
+				},
+				clientPayment: {
+					count: raw.clientPayment.count,
+					totalByCurrency: toArr(raw.clientPayment.paymentMap),
+				},
+				returning: {
+					count: raw.returning.count,
+					paymentByCurrency: toArr(raw.returning.paymentMap),
+				},
+				debtByCurrency: toArr(debtMap),
+			}
+
+			return { ...client, calc }
+		})
+
+		const debtCurrencyIdsForRates = new Set<string>()
+		for (const row of rows) {
+			for (const x of row.calc.debtByCurrency) debtCurrencyIdsForRates.add(x.currencyId)
+		}
+		const { rates: reportDebtRates, symbols: reportDebtSymbols } = await this.currencyRepository.findExchangeRatesAndSymbolsByIds([...debtCurrencyIdsForRates])
+		const rowsNetDebt: ClientReportRow[] = rows.map((row) => ({
+			...row,
+			calc: {
+				...row.calc,
+				debtByCurrency: netDebtCrossCurrencyRows(
+					row.calc.debtByCurrency.map((d) => ({ currencyId: d.currencyId, amount: d.amount })),
+					reportDebtRates,
+					reportDebtSymbols,
+				).map((d) => ({
+					...d,
+					currency: { id: d.currencyId, name: '', symbol: '' },
+				})),
+			},
+		}))
+
+		const currencyIdSet = new Set<string>()
+		for (const row of rowsNetDebt) {
+			const c = row.calc
+			for (const x of c.selling.totalPriceByCurrency) currencyIdSet.add(x.currencyId)
+			for (const x of c.selling.paymentByCurrency) currencyIdSet.add(x.currencyId)
+			for (const x of c.clientPayment.totalByCurrency) currencyIdSet.add(x.currencyId)
+			for (const x of c.returning.paymentByCurrency) currencyIdSet.add(x.currencyId)
+			for (const x of c.debtByCurrency) currencyIdSet.add(x.currencyId)
+		}
+		const currencyMap = currencyBriefMapFromRows(await this.currencyRepository.findBriefByIds([...currencyIdSet]))
+		const enrichedRows = rowsNetDebt.map((row) => this.enrichClientReportRow(row, currencyMap))
+
+		if (query.pagination) {
+			const totalCount = enrichedRows.length
+			const pagesCount = Math.ceil(totalCount / query.pageSize)
+			const pageSize = query.pageSize
+			const data = enrichedRows.slice((query.pageNumber - 1) * pageSize, query.pageNumber * pageSize)
+			return { data, totalCount, pagesCount, pageSize: data.length }
+		}
+
+		return { data: enrichedRows }
+	}
+
+	// ─── Dashboard summary (selling / returning / client payments) ─────────────
+
+	async getDashboardSummary(query: StatisticsDashboardSummaryRequest): Promise<StatisticsDashboardSummaryData> {
+		const dateFilter = query.startDate || query.endDate ? { gte: query.startDate, lte: query.endDate } : undefined
+
+		const sellingWhere = {
+			status: SellingStatusEnum.accepted,
+			deletedAt: null,
+			...(dateFilter && { date: dateFilter }),
+		}
+
+		const returningWhere = {
+			status: SellingStatusEnum.accepted,
+			deletedAt: null,
+			...(dateFilter && { date: dateFilter }),
+		}
+
+		const clientPaymentWhere = {
+			deletedAt: null,
+			...(dateFilter && { createdAt: dateFilter }),
+		}
+
+		const [sellingCount, returningCount, clientPaymentCount, sellingCostAndSellingRows, sellingTotalGroupBy, returningTotalGroupBy, clientPaymentGroupBy] = await Promise.all([
+			this.prisma.sellingModel.count({ where: sellingWhere }),
+			this.prisma.returningModel.count({ where: returningWhere }),
+			this.prisma.clientPaymentModel.count({ where: clientPaymentWhere }),
+			this.prisma.sellingProductMVPriceModel.findMany({
+				where: {
+					type: { in: [PriceTypeEnum.cost, PriceTypeEnum.selling] },
+					productMV: { selling: sellingWhere },
+				},
+				select: { type: true, totalPrice: true, currencyId: true, productMVId: true },
+			}),
+			this.prisma.sellingProductMVPriceModel.groupBy({
+				by: ['currencyId'],
+				where: {
+					type: PriceTypeEnum.selling,
+					productMV: { selling: sellingWhere },
+				},
+				_sum: { totalPrice: true },
+			}),
+			this.prisma.returningProductMVPriceModel.groupBy({
+				by: ['currencyId'],
+				where: {
+					type: PriceTypeEnum.selling,
+					productMV: { returning: returningWhere },
+				},
+				_sum: { totalPrice: true },
+			}),
+			this.prisma.clientPaymentMethodModel.groupBy({
+				by: ['currencyId'],
+				where: { deletedAt: null, payment: clientPaymentWhere },
+				_sum: { amount: true },
+			}),
+		])
+
+		const mvProfit = new Map<string, { cost: Decimal; selling: Decimal; currencyId: string }>()
+		for (const row of sellingCostAndSellingRows) {
+			let agg = mvProfit.get(row.productMVId)
+			if (!agg) {
+				agg = { cost: new Decimal(0), selling: new Decimal(0), currencyId: row.currencyId }
+				mvProfit.set(row.productMVId, agg)
+			}
+			if (row.type === PriceTypeEnum.cost) {
+				agg.cost = agg.cost.plus(row.totalPrice)
+				agg.currencyId = row.currencyId
+			}
+			if (row.type === PriceTypeEnum.selling) {
+				agg.selling = agg.selling.plus(row.totalPrice)
+				agg.currencyId = row.currencyId
+			}
+		}
+
+		const profitByCurrency = new Map<string, Decimal>()
+		for (const agg of mvProfit.values()) {
+			const profit = agg.selling.minus(agg.cost)
+			const cid = agg.currencyId
+			profitByCurrency.set(cid, (profitByCurrency.get(cid) ?? new Decimal(0)).plus(profit))
+		}
+
+		const profitRows: ClientReportByCurrency[] = Array.from(profitByCurrency.entries()).map(([currencyId, amount]) => ({
+			currencyId,
+			amount,
+			currency: { id: currencyId, name: '', symbol: '' },
+		}))
+
+		const totalSalesRows: ClientReportByCurrency[] = sellingTotalGroupBy.map((r) => ({
+			currencyId: r.currencyId,
+			amount: new Decimal(r._sum.totalPrice ?? 0),
+			currency: { id: r.currencyId, name: '', symbol: '' },
+		}))
+
+		const returningRows: ClientReportByCurrency[] = returningTotalGroupBy.map((r) => ({
+			currencyId: r.currencyId,
+			amount: new Decimal(r._sum.totalPrice ?? 0),
+			currency: { id: r.currencyId, name: '', symbol: '' },
+		}))
+
+		const clientPaymentRows: ClientReportByCurrency[] = clientPaymentGroupBy.map((r) => ({
+			currencyId: r.currencyId,
+			amount: new Decimal(r._sum.amount ?? 0),
+			currency: { id: r.currencyId, name: '', symbol: '' },
+		}))
+
+		const currencyIdSet = new Set<string>()
+		for (const r of profitRows) currencyIdSet.add(r.currencyId)
+		for (const r of totalSalesRows) currencyIdSet.add(r.currencyId)
+		for (const r of returningRows) currencyIdSet.add(r.currencyId)
+		for (const r of clientPaymentRows) currencyIdSet.add(r.currencyId)
+
+		const currencyMap = currencyBriefMapFromRows(await this.currencyRepository.findBriefByIds([...currencyIdSet]))
+
+		return {
+			selling: {
+				profitByCurrency: withCurrencyBriefAmountMany(profitRows, currencyMap),
+				totalSalesByCurrency: withCurrencyBriefAmountMany(totalSalesRows, currencyMap),
+				count: sellingCount,
+			},
+			returning: {
+				totalsByCurrency: withCurrencyBriefAmountMany(returningRows, currencyMap),
+				count: returningCount,
+			},
+			clientPayment: {
+				totalsByCurrency: withCurrencyBriefAmountMany(clientPaymentRows, currencyMap),
+				count: clientPaymentCount,
+			},
+		}
+	}
+}

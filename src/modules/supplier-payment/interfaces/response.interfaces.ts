@@ -1,0 +1,55 @@
+import { CurrencyBrief, GlobalResponse, PaginationResponse } from '@common'
+import type { SupplierDebtByCurrency } from '../../supplier/interfaces'
+import { SupplierPaymentRequired } from './fields.interfaces'
+import { Decimal } from '@prisma/client/runtime/library'
+
+export declare interface SupplierPaymentMethodData {
+	type: string
+	currencyId: string
+	amount: Decimal
+}
+
+export declare interface SupplierPaymentChangeMethodData {
+	type: string
+	currencyId: string
+	amount: Decimal
+}
+
+export declare interface SupplierPaymentCalcByCurrency {
+	currencyId: string
+	total: Decimal
+	currency: CurrencyBrief
+}
+
+export declare interface SupplierPaymentFindManyData extends PaginationResponse<SupplierPaymentFindOneData> {
+	calcByCurrency: SupplierPaymentCalcByCurrency[]
+	totalsByCurrency: SupplierPaymentCalcByCurrency[]
+}
+
+export declare interface SupplierPaymentFindOneData extends Pick<SupplierPaymentRequired, 'id'> {
+	/** `standalone` — `SupplierPaymentModel`; `arrival` — `SupplierArrivalPaymentModel` */
+	paymentSource?: 'standalone' | 'arrival'
+	arrivalId?: string | null
+	description?: string | null
+	staff?: { id: string; fullname: string; phone: string }
+	supplier?: { id: string; fullname: string; phone: string; debtByCurrency?: SupplierDebtByCurrency[] }
+	totalsByCurrency?: SupplierPaymentCalcByCurrency[]
+	paymentMethods?: SupplierPaymentMethodData[]
+	changeMethods?: SupplierPaymentChangeMethodData[]
+}
+
+export declare interface SupplierPaymentFindManyResponse extends GlobalResponse {
+	data: SupplierPaymentFindManyData
+}
+
+export declare interface SupplierPaymentFindOneResponse extends GlobalResponse {
+	data: SupplierPaymentFindOneData
+}
+
+export declare interface SupplierPaymentCreateOneResponse extends GlobalResponse {
+	data: SupplierPaymentFindOneData
+}
+
+export declare interface SupplierPaymentModifyResponse extends GlobalResponse {
+	data: null
+}

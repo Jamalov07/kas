@@ -1,0 +1,36 @@
+import { PaginationRequest, RequestOtherFields } from '@common'
+import { Decimal } from '@prisma/client/runtime/library'
+
+export declare interface SellingProductMVFindManyRequest extends PaginationRequest, Pick<RequestOtherFields, 'startDate' | 'endDate'> {
+	sellingId?: string
+	productId?: string
+	staffId?: string
+}
+
+export declare interface SellingProductMVFindOneRequest {
+	id: string
+}
+
+export declare interface SellingProductMVCreateOneRequest {
+	sellingId: string
+	productId: string
+	count: number
+	price: number
+	/** Chegirma foizi (0–100) */
+	discount?: number
+	currencyId: string
+	staffId?: string
+}
+
+export declare interface SellingProductMVUpdateOneRequest {
+	count?: number
+	price?: number
+	discount?: number
+	currencyId?: string
+	productId?: string
+	sellingId?: string
+}
+
+export declare interface SellingProductMVDeleteOneRequest {
+	id: string
+}
