@@ -9,7 +9,8 @@ const emptyBrief = (currencyId: string): SellingDebtByCurrencyRow['currency'] =>
 })
 
 /**
- * Bot/kanal/PDF «Eski qarz» — har bir valyutada:
+ * Bot/kanal/PDF «Eski qarz» — faqat `newDebtRows` shu sotuv yopilgandagi qarz bo‘lsa to‘g‘ri.
+ * Joriy (live) mijoz qarzini bermang: keyingi sotuvlar ham qo‘shilib qoladi.
  * **eski = yangi oxirgi qarz + shu sotuv bo‘yicha jami to‘lov − shu sotuv jami summasi**
  * (`yangi = eski + sotuv − to‘lov` tenglamasining teskarisi).
  */
@@ -107,7 +108,9 @@ export function buildSellingChannelSummaryBlock(selling: SellingFindOneData & { 
 	const oldDebt = formatSellingMoneyRows(selling.clientDebtBeforeSelling)
 	const saleTotal = formatSellingTotalPrices(selling.totalPrices)
 	const paid = formatSellingPaymentTotals(selling.payment)
-	const newDebt = formatSellingMoneyRows(selling.client?.debtByCurrency as SellingDebtByCurrencyRow[] | undefined)
+	const newDebt = formatSellingMoneyRows(
+		(selling.clientDebtAfterSelling ?? selling.client?.debtByCurrency) as SellingDebtByCurrencyRow[] | undefined,
+	)
 
 	return (
 		`🧾 Sotuv - ${orderNo}\n` +
@@ -131,7 +134,9 @@ export function buildSellingPdfFooterSummaryBlock(
 	const oldDebt = formatSellingMoneyRows(selling.clientDebtBeforeSelling)
 	const saleTotal = formatSellingTotalPrices(selling.totalPrices)
 	const paid = formatSellingPaymentTotals(selling.payment)
-	const newDebt = formatSellingMoneyRows(selling.client?.debtByCurrency as SellingDebtByCurrencyRow[] | undefined)
+	const newDebt = formatSellingMoneyRows(
+		(selling.clientDebtAfterSelling ?? selling.client?.debtByCurrency) as SellingDebtByCurrencyRow[] | undefined,
+	)
 
 	return [/* `Sotuv vaqti: ${time}`, `Xaridor: ${buyer}`, */ `Eski qarz: ${oldDebt}`, `Jami sotuv summasi: ${saleTotal}`, `Jami to'lov: ${paid}`, `Yangi qarz: ${newDebt}`].join(
 		'\n',

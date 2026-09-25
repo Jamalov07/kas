@@ -27,7 +27,9 @@ const CLIENT_DEBT_SOURCE_SELECT = {
 	sellings: {
 		where: { status: SellingStatusEnum.accepted, deletedAt: null },
 		select: {
+			id: true,
 			date: true,
+			createdAt: true,
 			description: true,
 			products: {
 				select: {
@@ -54,7 +56,9 @@ const CLIENT_DEBT_SOURCE_SELECT = {
 	returnings: {
 		where: { status: SellingStatusEnum.accepted, deletedAt: null },
 		select: {
+			id: true,
 			date: true,
+			createdAt: true,
 			description: true,
 			products: {
 				select: {
@@ -81,6 +85,7 @@ const CLIENT_DEBT_SOURCE_SELECT = {
 	payments: {
 		where: { deletedAt: null },
 		select: {
+			id: true,
 			createdAt: true,
 			paymentMethods: {
 				select: { type: true, amount: true, currencyId: true },

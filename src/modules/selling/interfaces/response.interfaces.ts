@@ -101,6 +101,8 @@ export declare interface SellingFindOneData extends Pick<SellingRequired, 'id' |
 	staff?: any
 	/** Shu hujjat qabul qilingunga qadar xaridor qarzi (kanal/PDF ostki qismi) */
 	clientDebtBeforeSelling?: SellingDebtByCurrencyRow[]
+	/** Shu hujjatdan keyingi xaridor qarzi (shu sotuv kiritiladi, keyingilari yo‘q) */
+	clientDebtAfterSelling?: SellingDebtByCurrencyRow[]
 	/** Hujjat bo‘yicha qoldiq qarz, valyuta bo‘yicha */
 	debtByCurrency?: SellingDebtByCurrencyRow[]
 	totalPrices?: SellingTotalByCurrency[]

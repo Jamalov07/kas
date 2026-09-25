@@ -35,7 +35,7 @@ import { ExcelService } from '../shared'
 import { Response } from 'express'
 import { BotService } from '../bot'
 import { BotSellingProductTitleEnum, BotSellingTitleEnum } from './enums'
-import { computeClientDebtBeforeSellingFromClosingTotals, netSellingDebtRowsForDisplay } from './helpers/selling-channel-summary.helper'
+import { netSellingDebtRowsForDisplay } from './helpers/selling-channel-summary.helper'
 import { ClientService } from '../client'
 import type { ClientDebtByCurrency } from '../client/interfaces'
 import { CurrencyRepository } from '../currency'
@@ -53,6 +53,16 @@ export class SellingService {
 		private readonly clientService: ClientService,
 		private readonly currencyRepository: CurrencyRepository,
 	) {}
+
+	private sellingDebtMoment(selling: { id: string; date: Date; createdAt: Date; client: { id: string } }) {
+		return { id: selling.id, clientId: selling.client.id, date: selling.date, createdAt: selling.createdAt }
+	}
+
+	private async displaySellingDebtRows(rows: SellingDebtByCurrencyRow[] | undefined): Promise<SellingDebtByCurrencyRow[]> {
+		const list = rows ?? []
+		const { rates, symbols } = await this.currencyRepository.findExchangeRatesAndSymbolsByIds(list.map((r) => r.currencyId))
+		return netSellingDebtRowsForDisplay(list, rates, symbols)
+	}
 
 	/** Selling MV da har bir qatorda narxlarda faqat `selling` — bitta qatorni valyuta bo‘yicha yig‘amiz */
 	private calcTotalPricesFromProducts(products: { prices: { type: PriceTypeEnum; currencyId: string; totalPrice: Decimal; currency?: { symbol: string } }[] }[]) {
@@ -354,10 +364,12 @@ export class SellingService {
 		const calcPage = this.buildFindManyCalcPage(sellings, activeCurrencyIds, activeBriefMap, activeDebtRates, activeDebtSymbols)
 
 		const clientIds = [...new Set(sellings.map((s) => s.client.id))]
-		const clientDebtMap = clientIds.length ? await this.clientService.getDebtSnapshotsByClientIds(clientIds) : new Map()
+		const debtAround = clientIds.length
+			? await this.clientService.getDebtAroundSellings(sellings.map((s) => this.sellingDebtMoment(s)))
+			: { currentByClientId: new Map(), beforeBySellingId: new Map(), afterBySellingId: new Map() }
 		const clientsWithDebtObject: Record<string, any> = {}
 		for (const id of clientIds) {
-			clientsWithDebtObject[id] = clientDebtMap.get(id) ?? []
+			clientsWithDebtObject[id] = debtAround.currentByClientId.get(id) ?? []
 		}
 
 		const sellingDebtCurrIds = new Set<string>()
@@ -385,6 +397,8 @@ export class SellingService {
 			const products = this.mapSellingProductsPrices(selling.products)
 			const totalPayments = aggregateAmountsByCurrencyId(selling.payment?.paymentMethods)
 			const totalChanges = aggregateAmountsByCurrencyId(selling.payment?.changeMethods)
+			const clientDebtBeforeSelling = debtAround.beforeBySellingId.get(selling.id) ?? []
+			const clientDebtAfterSelling = debtAround.afterBySellingId.get(selling.id) ?? []
 
 			return {
 				...selling,
@@ -394,6 +408,8 @@ export class SellingService {
 				totalPayments,
 				totalChanges,
 				debtByCurrency,
+				clientDebtBeforeSelling,
+				clientDebtAfterSelling,
 				client: { ...selling.client, debtByCurrency: clientsWithDebtObject[selling.client.id] || [] },
 			}
 		})
@@ -407,11 +423,15 @@ export class SellingService {
 			for (const t of s.totalPayments) currencyIdsForBrief.add(t.currencyId)
 			for (const t of s.totalChanges) currencyIdsForBrief.add(t.currencyId)
 			for (const d of clientsWithDebtObject[s.client.id] ?? []) currencyIdsForBrief.add(d.currencyId)
+			for (const d of s.clientDebtBeforeSelling) currencyIdsForBrief.add(d.currencyId)
+			for (const d of s.clientDebtAfterSelling) currencyIdsForBrief.add(d.currencyId)
 		}
 		const currencyBriefMap = currencyBriefMapFromRows(await this.currencyRepository.findBriefByIds([...currencyIdsForBrief]))
 		const sellingsWithDebtCurrency = mappedSellings.map((s) => ({
 			...s,
 			debtByCurrency: withCurrencyBriefAmountMany(s.debtByCurrency, currencyBriefMap),
+			clientDebtBeforeSelling: withCurrencyBriefAmountMany(s.clientDebtBeforeSelling, currencyBriefMap),
+			clientDebtAfterSelling: withCurrencyBriefAmountMany(s.clientDebtAfterSelling, currencyBriefMap),
 			totalPayments: withCurrencyBriefTotalMany(s.totalPayments, currencyBriefMap),
 			totalChanges: withCurrencyBriefTotalMany(s.totalChanges, currencyBriefMap),
 			client: {
@@ -449,7 +469,12 @@ export class SellingService {
 		const calcPage = this.buildFindManyCalcPage(sellings, activeCurrencyIds, activeBriefMap, activeDebtRates, activeDebtSymbols)
 
 		const clientIds = [...new Set(sellings.map((s) => s.client.id))]
-		const clientDebtMap = clientIds.length ? await this.clientService.getDebtSnapshotsByClientIdsFast(clientIds) : new Map()
+		const [clientDebtMap, debtAround] = clientIds.length
+			? await Promise.all([
+					this.clientService.getDebtSnapshotsByClientIdsFast(clientIds),
+					this.clientService.getDebtAroundSellings(sellings.map((s) => this.sellingDebtMoment(s))),
+				])
+			: [new Map<string, ClientDebtByCurrency[]>(), { beforeBySellingId: new Map<string, ClientDebtByCurrency[]>(), afterBySellingId: new Map<string, ClientDebtByCurrency[]>() }]
 		const clientsWithDebtObject: Record<string, ClientDebtByCurrency[]> = {}
 		for (const id of clientIds) {
 			clientsWithDebtObject[id] = clientDebtMap.get(id) ?? []
@@ -482,6 +507,8 @@ export class SellingService {
 			const products = this.mapSellingProductsPricesWithCurrency(selling.products, listCurrencyMap)
 			const totalPayments = aggregateAmountsByCurrencyId(selling.payment?.paymentMethods)
 			const totalChanges = aggregateAmountsByCurrencyId(selling.payment?.changeMethods)
+			const clientDebtBeforeSelling = debtAround.beforeBySellingId.get(selling.id) ?? []
+			const clientDebtAfterSelling = debtAround.afterBySellingId.get(selling.id) ?? []
 
 			return {
 				...selling,
@@ -491,6 +518,8 @@ export class SellingService {
 				totalPayments,
 				totalChanges,
 				debtByCurrency,
+				clientDebtBeforeSelling,
+				clientDebtAfterSelling,
 				client: { ...selling.client, debtByCurrency: clientsWithDebtObject[selling.client.id] || [] },
 			}
 		})
@@ -504,11 +533,15 @@ export class SellingService {
 			for (const t of s.totalPayments) currencyIdsForBrief.add(t.currencyId)
 			for (const t of s.totalChanges) currencyIdsForBrief.add(t.currencyId)
 			for (const d of clientsWithDebtObject[s.client.id] ?? []) currencyIdsForBrief.add(d.currencyId)
+			for (const d of s.clientDebtBeforeSelling) currencyIdsForBrief.add(d.currencyId)
+			for (const d of s.clientDebtAfterSelling) currencyIdsForBrief.add(d.currencyId)
 		}
 		const currencyBriefMap = currencyBriefMapFromRows(await this.currencyRepository.findBriefByIds([...currencyIdsForBrief]))
 		const sellingsWithDebtCurrency = mappedSellings.map((s) => ({
 			...s,
 			debtByCurrency: withCurrencyBriefAmountMany(s.debtByCurrency, currencyBriefMap),
+			clientDebtBeforeSelling: withCurrencyBriefAmountMany(s.clientDebtBeforeSelling, currencyBriefMap),
+			clientDebtAfterSelling: withCurrencyBriefAmountMany(s.clientDebtAfterSelling, currencyBriefMap),
 			totalPayments: withCurrencyBriefTotalMany(s.totalPayments, currencyBriefMap),
 			totalChanges: withCurrencyBriefTotalMany(s.totalChanges, currencyBriefMap),
 			client: {
@@ -550,14 +583,18 @@ export class SellingService {
 		const totalPayments = aggregateAmountsByCurrencyId(selling.payment?.paymentMethods)
 		const totalChanges = aggregateAmountsByCurrencyId(selling.payment?.changeMethods)
 
-		const clientDebtMap = await this.clientService.getDebtSnapshotsByClientIds([selling.client.id])
-		const clientDebtRows = clientDebtMap.get(selling.client.id) ?? []
+		const debtAround = await this.clientService.getDebtAroundSellings([this.sellingDebtMoment(selling)])
+		const clientDebtRows = debtAround.currentByClientId.get(selling.client.id) ?? []
+		const clientDebtBeforeSelling = debtAround.beforeBySellingId.get(selling.id) ?? []
+		const clientDebtAfterSelling = debtAround.afterBySellingId.get(selling.id) ?? []
 
 		const currencyIdsForBrief = new Set<string>()
 		for (const d of debtByCurrencyNet) currencyIdsForBrief.add(d.currencyId)
 		for (const t of totalPayments) currencyIdsForBrief.add(t.currencyId)
 		for (const t of totalChanges) currencyIdsForBrief.add(t.currencyId)
 		for (const d of clientDebtRows) currencyIdsForBrief.add(d.currencyId)
+		for (const d of clientDebtBeforeSelling) currencyIdsForBrief.add(d.currencyId)
+		for (const d of clientDebtAfterSelling) currencyIdsForBrief.add(d.currencyId)
 		const currencyBriefMap = currencyBriefMapFromRows(await this.currencyRepository.findBriefByIds([...currencyIdsForBrief]))
 		const debtByCurrency: SellingDebtByCurrencyRow[] = withCurrencyBriefAmountMany(debtByCurrencyNet, currencyBriefMap)
 
@@ -570,6 +607,8 @@ export class SellingService {
 				totalPayments: withCurrencyBriefTotalMany(totalPayments, currencyBriefMap),
 				totalChanges: withCurrencyBriefTotalMany(totalChanges, currencyBriefMap),
 				debtByCurrency,
+				clientDebtBeforeSelling: withCurrencyBriefAmountMany(clientDebtBeforeSelling, currencyBriefMap),
+				clientDebtAfterSelling: withCurrencyBriefAmountMany(clientDebtAfterSelling, currencyBriefMap),
 				client: {
 					...selling.client,
 					debtByCurrency: withCurrencyBriefAmountMany(clientDebtRows, currencyBriefMap),
@@ -631,14 +670,9 @@ export class SellingService {
 				const payment = this.buildPaymentData(selling.payment)
 
 				const invoiceDebt = this.calcDebtByCurrency2(totalPrices, payment)
-
-				const clientDebtBeforeSellingRaw = computeClientDebtBeforeSellingFromClosingTotals(
-					clientResult.data.debtByCurrency as SellingDebtByCurrencyRow[] | undefined,
-					totalPrices,
-					payment,
-				)
-				const { rates: oldDebtRates, symbols: oldDebtSymbols } = await this.currencyRepository.findExchangeRatesAndSymbolsByIds(clientDebtBeforeSellingRaw.map((r) => r.currencyId))
-				const clientDebtBeforeSellingResolved = netSellingDebtRowsForDisplay(clientDebtBeforeSellingRaw, oldDebtRates, oldDebtSymbols)
+				const debtAround = await this.clientService.getDebtAroundSellings([this.sellingDebtMoment(selling)])
+				const clientDebtBeforeSellingResolved = await this.displaySellingDebtRows(debtAround.beforeBySellingId.get(selling.id))
+				const clientDebtAfterSellingResolved = await this.displaySellingDebtRows(debtAround.afterBySellingId.get(selling.id))
 
 				const sellingInfo = {
 					...selling,
@@ -648,6 +682,7 @@ export class SellingService {
 					payment,
 					debtByCurrency: invoiceDebt,
 					clientDebtBeforeSelling: clientDebtBeforeSellingResolved,
+					clientDebtAfterSelling: clientDebtAfterSellingResolved,
 					products: selling.products.map((p) => ({ ...p, status: BotSellingProductTitleEnum.new })),
 				} as any
 
@@ -722,14 +757,9 @@ export class SellingService {
 				const isFirstAccept = !wasAccepted && isAcceptedNow
 
 				const invoiceDebt = this.calcDebtByCurrency2(totalPrices, payment)
-
-				const clientDebtBeforeSellingRaw = computeClientDebtBeforeSellingFromClosingTotals(
-					clientResult.data.debtByCurrency as SellingDebtByCurrencyRow[] | undefined,
-					totalPrices,
-					payment,
-				)
-				const { rates: oldDebtRates, symbols: oldDebtSymbols } = await this.currencyRepository.findExchangeRatesAndSymbolsByIds(clientDebtBeforeSellingRaw.map((r) => r.currencyId))
-				const clientDebtBeforeSellingForBot = netSellingDebtRowsForDisplay(clientDebtBeforeSellingRaw, oldDebtRates, oldDebtSymbols)
+				const debtAround = await this.clientService.getDebtAroundSellings([this.sellingDebtMoment(updatedSelling)])
+				const clientDebtBeforeSellingForBot = await this.displaySellingDebtRows(debtAround.beforeBySellingId.get(updatedSelling.id))
+				const clientDebtAfterSellingForBot = await this.displaySellingDebtRows(debtAround.afterBySellingId.get(updatedSelling.id))
 
 				const sellingInfo = {
 					...updatedSelling,
@@ -739,6 +769,7 @@ export class SellingService {
 					payment,
 					debtByCurrency: invoiceDebt,
 					clientDebtBeforeSelling: clientDebtBeforeSellingForBot,
+					clientDebtAfterSelling: clientDebtAfterSellingForBot,
 					products: updatedSelling.products.map((p) => ({ ...p, status: BotSellingProductTitleEnum.new })),
 				} as any
 

@@ -7,10 +7,13 @@ import {
 	DebtTypeEnum,
 	DeleteMethodEnum,
 	ERROR_MSG,
+	isClientLedgerOpBeforeSelling,
+	isClientLedgerOpThroughSelling,
 	netDebtCrossCurrencyRows,
 	roundDebtDecimal,
 	withCurrencyBrief,
 	withCurrencyBriefAmountMany,
+	type ClientLedgerMoment,
 } from '@common'
 import {
 	ClientGetOneRequest,
@@ -152,6 +155,81 @@ export class ClientService {
 			out.set(row.id, withCurrencyBriefAmountMany(arr, currencyMap))
 		}
 		return out
+	}
+
+	/**
+	 * Mijoz qarzining sotuv atrofidagi kesimi:
+	 * - `current` — hozirgi jami qarz
+	 * - `before` — shu sotuvgacha (keyingi sotuv/to‘lov/qaytish kirmaydi)
+	 * - `after` — shu sotuvgacha + shu sotuv
+	 */
+	async getDebtAroundSellings(
+		moments: Array<{ id: string; clientId: string; date: Date; createdAt: Date }>,
+	): Promise<{
+		currentByClientId: Map<string, ClientDebtByCurrency[]>
+		beforeBySellingId: Map<string, ClientDebtByCurrency[]>
+		afterBySellingId: Map<string, ClientDebtByCurrency[]>
+	}> {
+		const currentByClientId = new Map<string, ClientDebtByCurrency[]>()
+		const beforeBySellingId = new Map<string, ClientDebtByCurrency[]>()
+		const afterBySellingId = new Map<string, ClientDebtByCurrency[]>()
+		const uniqueMoments = moments.filter((m) => m?.id && m.clientId)
+		const clientIds = [...new Set(uniqueMoments.map((m) => m.clientId))]
+		if (clientIds.length === 0) return { currentByClientId, beforeBySellingId, afterBySellingId }
+
+		const rows = await this.clientRepository.findDebtSourcesByClientIds(clientIds)
+		const byClient = new Map(rows.map((row) => [row.id, row]))
+		const rawCurrent = new Map<string, { currencyId: string; amount: Decimal }[]>()
+		const rawBefore = new Map<string, { currencyId: string; amount: Decimal }[]>()
+		const rawAfter = new Map<string, { currencyId: string; amount: Decimal }[]>()
+		const allCurrencyIds = new Set<string>()
+
+		const collect = (debtMap: Map<string, Decimal>, into: Map<string, { currencyId: string; amount: Decimal }[]>, key: string) => {
+			const arr = Array.from(debtMap.entries()).map(([currencyId, amount]) => ({ currencyId, amount }))
+			for (const r of arr) allCurrencyIds.add(r.currencyId)
+			into.set(key, arr)
+		}
+
+		for (const row of rows) {
+			collect(this.calcDebtByCurrency(row.sellings, row.payments, row.returnings), rawCurrent, row.id)
+		}
+
+		for (const moment of uniqueMoments) {
+			const sellingMoment: ClientLedgerMoment = { id: moment.id, date: moment.date, createdAt: moment.createdAt }
+			const row = byClient.get(moment.clientId)
+			if (!row) {
+				rawBefore.set(moment.id, [])
+				rawAfter.set(moment.id, [])
+				continue
+			}
+
+			const sellingsBefore = row.sellings.filter((s) => isClientLedgerOpBeforeSelling(s, sellingMoment, s.id === moment.id))
+			const returningsBefore = row.returnings.filter((r) => isClientLedgerOpBeforeSelling(r, sellingMoment))
+			const paymentsBefore = row.payments.filter((p) =>
+				isClientLedgerOpBeforeSelling({ id: p.id, date: p.createdAt, createdAt: p.createdAt }, sellingMoment),
+			)
+			collect(this.calcDebtByCurrency(sellingsBefore, paymentsBefore, returningsBefore), rawBefore, moment.id)
+
+			const sellingsThrough = row.sellings.filter((s) => isClientLedgerOpThroughSelling(s, sellingMoment, s.id === moment.id))
+			const returningsThrough = row.returnings.filter((r) => isClientLedgerOpThroughSelling(r, sellingMoment))
+			const paymentsThrough = row.payments.filter((p) =>
+				isClientLedgerOpThroughSelling({ id: p.id, date: p.createdAt, createdAt: p.createdAt }, sellingMoment),
+			)
+			collect(this.calcDebtByCurrency(sellingsThrough, paymentsThrough, returningsThrough), rawAfter, moment.id)
+		}
+
+		const ids = [...allCurrencyIds]
+		const [{ rates, symbols }, currencyBriefs] = await Promise.all([this.currencyRepository.findExchangeRatesAndSymbolsByIds(ids), this.currencyRepository.findBriefByIds(ids)])
+		const currencyMap = currencyBriefMapFromRows(currencyBriefs)
+		const finalize = (raw: Map<string, { currencyId: string; amount: Decimal }[]>, out: Map<string, ClientDebtByCurrency[]>) => {
+			for (const [key, arr] of raw.entries()) {
+				out.set(key, withCurrencyBriefAmountMany(netDebtCrossCurrencyRows(arr, rates, symbols), currencyMap))
+			}
+		}
+		finalize(rawCurrent, currentByClientId)
+		finalize(rawBefore, beforeBySellingId)
+		finalize(rawAfter, afterBySellingId)
+		return { currentByClientId, beforeBySellingId, afterBySellingId }
 	}
 
 	/** SQL aggregate — `getDebtSnapshotsByClientIds` tez alternativi (selling/product ro‘yxatlari uchun) */

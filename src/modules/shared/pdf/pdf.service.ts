@@ -238,7 +238,9 @@ export class PdfService {
 	async generateKasInvoicePdfBuffer(selling: SellingFindOneData): Promise<Buffer> {
 		const buyerLine = [selling.publicId, selling.client?.fullname, selling.client?.phone].filter(Boolean).join(' ')
 		const oldDebtLines = this.kasMoneyRowsStackRight(selling.clientDebtBeforeSelling as SellingDebtByCurrencyRow[] | undefined)
-		const newDebtBlock = this.kasMoneyRowsStackRight(selling.client?.debtByCurrency as SellingDebtByCurrencyRow[] | undefined)
+		const newDebtBlock = this.kasMoneyRowsStackRight(
+			(selling.clientDebtAfterSelling ?? selling.client?.debtByCurrency) as SellingDebtByCurrencyRow[] | undefined,
+		)
 		const paidBlock = this.kasPaymentMethodsStackRight(selling.payment)
 
 		const headerGray = '#e8e8e8'
