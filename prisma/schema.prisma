@@ -185,7 +185,7 @@ model ClientModel {
   id          String  @map("id")          @db.Uuid           @default(dbgenerated("GEN_RANDOM_UUID()"))
   fullname    String  @map("fullname")    @db.VarChar()
   phone       String? @map("phone")       @db.VarChar()      @unique
-  phone2      String? @map("phone2")      @db.VarChar()      @unique
+  phone2      String? @map("phone2")      @db.VarChar()
   description String? @map("description") @db.VarChar()      @default("")
 
   telegrams  BotUserModel[]
