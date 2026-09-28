@@ -49,6 +49,23 @@ export class ClientService {
 		this.clientRepository = clientRepository
 	}
 
+	private mapTelegramFields(telegrams?: Array<{ id: string; isActive?: boolean }> | null) {
+		const list = telegrams ?? []
+		return { telegram: list[0], telegrams: list }
+	}
+
+	private normalizeOptionalPhone(phone?: string | null) {
+		const value = phone?.trim()
+		return value ? value : undefined
+	}
+
+	private async assertClientPhoneFree(phone: string, excludeId?: string) {
+		const existing = await this.clientRepository.findFirstByAnyPhone(phone)
+		if (existing && existing.id !== excludeId) {
+			throw new BadRequestException(ERROR_MSG.CLIENT.PHONE_EXISTS.UZ)
+		}
+	}
+
 	private calcDebtByCurrency(
 		sellings: Array<{
 			products: Array<{ prices: Array<{ totalPrice: Decimal; currencyId: string }> }>
@@ -463,8 +480,9 @@ export class ClientService {
 				id: c.id,
 				fullname: c.fullname,
 				phone: c.phone,
+				phone2: c.phone2,
 				description: c.description,
-				telegram: c.telegram,
+				...this.mapTelegramFields(c.telegrams),
 				createdAt: c.createdAt,
 				debtByCurrency,
 				lastSellingDate: c.sellings?.length ? c.sellings[0].date : null,
@@ -546,8 +564,9 @@ export class ClientService {
 				id: c.id,
 				fullname: c.fullname,
 				phone: c.phone,
+				phone2: c.phone2,
 				description: c.description ?? null,
-				telegram: c.telegram,
+				...this.mapTelegramFields(c.telegrams),
 				createdAt: c.createdAt,
 				lastSellingDate: c.sellings?.length ? c.sellings[0].date : null,
 				_rawDebt: Array.from(debtMap.entries()).map(([currencyId, amount]) => ({ currencyId, amount })),
@@ -725,8 +744,9 @@ export class ClientService {
 				id: c.id,
 				fullname: c.fullname,
 				phone: c.phone,
+				phone2: c.phone2,
 				description: c.description ?? null,
-				telegram: c.telegram,
+				...this.mapTelegramFields(c.telegrams),
 				createdAt: c.createdAt,
 				lastSellingDate: lastDates.get(c.id) ?? null,
 				debtByCurrency: withCurrencyBriefAmountMany(netted, currencyMap),
@@ -898,6 +918,7 @@ export class ClientService {
 				id: client.id,
 				fullname: client.fullname,
 				phone: client.phone,
+				phone2: client.phone2,
 				description: client.description,
 				createdAt: client.createdAt,
 				updatedAt: client.updatedAt,
@@ -909,7 +930,7 @@ export class ClientService {
 					debtByCurrency: deedDebtByCurrency,
 					deeds: filteredDeeds,
 				},
-				telegram: client.telegram,
+				...this.mapTelegramFields(client.telegrams),
 				lastSellingDate: client.sellings?.length ? client.sellings[0].date : null,
 			},
 			success: { messages: ['find one success'] },
@@ -942,27 +963,31 @@ export class ClientService {
 	}
 
 	async createOne(body: ClientCreateOneRequest) {
-		const candidate = await this.clientRepository.getOne({ phone: body.phone })
-		if (candidate) {
+		const phone2 = this.normalizeOptionalPhone(body.phone2)
+		if (phone2 && phone2 === body.phone) {
 			throw new BadRequestException(ERROR_MSG.CLIENT.PHONE_EXISTS.UZ)
 		}
+		await this.assertClientPhoneFree(body.phone)
+		if (phone2) await this.assertClientPhoneFree(phone2)
 
-		const client = await this.clientRepository.createOne({ ...body })
+		const client = await this.clientRepository.createOne({ ...body, phone2 })
 
 		return createResponse({ data: client, success: { messages: ['create one success'] } })
 	}
 
 	async updateOne(query: ClientGetOneRequest, body: ClientUpdateOneRequest) {
-		await this.getOne(query)
+		const current = await this.getOne(query)
 
-		if (body.phone) {
-			const candidate = await this.clientRepository.getOne({ phone: body.phone })
-			if (candidate && candidate.id !== query.id) {
-				throw new BadRequestException(ERROR_MSG.CLIENT.PHONE_EXISTS.UZ)
-			}
+		const phone2 = body.phone2 !== undefined ? this.normalizeOptionalPhone(body.phone2) ?? null : undefined
+		const nextPhone = body.phone ?? current.data.phone
+		const nextPhone2 = phone2 !== undefined ? phone2 : current.data.phone2
+		if (nextPhone && nextPhone2 && nextPhone === nextPhone2) {
+			throw new BadRequestException(ERROR_MSG.CLIENT.PHONE_EXISTS.UZ)
 		}
+		if (body.phone) await this.assertClientPhoneFree(body.phone, query.id)
+		if (phone2) await this.assertClientPhoneFree(phone2, query.id)
 
-		await this.clientRepository.updateOne(query, { ...body })
+		await this.clientRepository.updateOne(query, { ...body, phone2 })
 
 		return createResponse({ data: null, success: { messages: ['update one success'] } })
 	}

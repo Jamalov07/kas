@@ -17,9 +17,10 @@ const CLIENT_LIST_LIGHT_SELECT = {
 	id: true,
 	fullname: true,
 	phone: true,
+	phone2: true,
 	description: true,
 	createdAt: true,
-	telegram: { select: { id: true, isActive: true } },
+	telegrams: { select: { id: true, isActive: true } },
 } as const
 
 /** `ClientService.calcDebtByCurrency` uchun — `findMany` bilan bir xil ma’lumot */
@@ -112,6 +113,7 @@ export class ClientRepository {
 			OR: [
 				{ fullname: { contains: word, mode: Prisma.QueryMode.insensitive } },
 				{ phone: { contains: word, mode: Prisma.QueryMode.insensitive } },
+				{ phone2: { contains: word, mode: Prisma.QueryMode.insensitive } },
 				{ description: { contains: word, mode: Prisma.QueryMode.insensitive } },
 			],
 		})
@@ -141,9 +143,10 @@ export class ClientRepository {
 				id: true,
 				fullname: true,
 				phone: true,
+				phone2: true,
 				description: true,
 				createdAt: true,
-				telegram: { select: { id: true, isActive: true } },
+				telegrams: { select: { id: true, isActive: true } },
 				...CLIENT_DEBT_SOURCE_SELECT,
 			},
 			...paginationOptions,
@@ -159,11 +162,12 @@ export class ClientRepository {
 				id: true,
 				fullname: true,
 				phone: true,
+				phone2: true,
 				description: true,
 				createdAt: true,
 				updatedAt: true,
 				deletedAt: true,
-				telegram: { select: { id: true, isActive: true } },
+				telegrams: { select: { id: true, isActive: true } },
 				sellings: {
 					where: { status: SellingStatusEnum.accepted, deletedAt: null },
 					select: {
@@ -315,9 +319,10 @@ export class ClientRepository {
 				id: true,
 				fullname: true,
 				phone: true,
+				phone2: true,
 				description: true,
 				createdAt: true,
-				telegram: { select: { id: true, isActive: true } },
+				telegrams: { select: { id: true, isActive: true } },
 				...CLIENT_DEBT_SOURCE_SELECT,
 			},
 			orderBy: [{ sellings: { _count: 'desc' } }, { createdAt: 'desc' }],
@@ -351,10 +356,17 @@ export class ClientRepository {
 	async getOne(query: ClientGetOneRequest) {
 		const client = await this.prisma.clientModel.findFirst({
 			where: { id: query.id, fullname: query.fullname, phone: query.phone },
-			select: { id: true, fullname: true, phone: true, createdAt: true, deletedAt: true },
+			select: { id: true, fullname: true, phone: true, phone2: true, createdAt: true, deletedAt: true },
 		})
 
 		return client
+	}
+
+	async findFirstByAnyPhone(phone: string) {
+		return this.prisma.clientModel.findFirst({
+			where: { OR: [{ phone }, { phone2: phone }] },
+			select: { id: true, phone: true, phone2: true },
+		})
 	}
 
 	async countGetMany(query: ClientGetManyRequest) {
@@ -373,12 +385,14 @@ export class ClientRepository {
 			data: {
 				fullname: body.fullname,
 				phone: body.phone,
+				phone2: body.phone2,
 				description: body.description,
 			},
 			select: {
 				id: true,
 				fullname: true,
 				phone: true,
+				phone2: true,
 				description: true,
 				createdAt: true,
 			},
@@ -392,6 +406,7 @@ export class ClientRepository {
 			data: {
 				fullname: body.fullname,
 				phone: body.phone,
+				phone2: body.phone2,
 				description: body.description,
 				deletedAt: body.deletedAt,
 			},

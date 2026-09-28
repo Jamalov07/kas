@@ -54,6 +54,10 @@ export class SellingService {
 		private readonly currencyRepository: CurrencyRepository,
 	) {}
 
+	private clientHasBot(client?: { telegram?: { id?: string }; telegrams?: Array<{ id?: string }> }) {
+		return !!(client?.telegram?.id || client?.telegrams?.some((t) => t?.id))
+	}
+
 	private sellingDebtMoment(selling: { id: string; date: Date; createdAt: Date; client: { id: string } }) {
 		return { id: selling.id, clientId: selling.client.id, date: selling.date, createdAt: selling.createdAt }
 	}
@@ -686,14 +690,14 @@ export class SellingService {
 					products: selling.products.map((p) => ({ ...p, status: BotSellingProductTitleEnum.new })),
 				} as any
 
-				if ((body.send || resolveBrandName() === 'KAS') && clientResult.data.telegram?.id) {
+				if ((body.send || resolveBrandName() === 'KAS') && this.clientHasBot(clientResult.data)) {
 					await this.botService.sendSellingToClient(sellingInfo).catch((e) => console.log('bot client error:', e))
 				}
 				await this.botService.sendSellingToChannel(sellingInfo).catch((e) => console.log('bot channel error:', e))
 
 				if ((payment?.paymentMethods?.length ?? 0) > 0 || (payment?.changeMethods?.length ?? 0) > 0) {
 					await this.botService.sendPaymentToChannel(payment, false, clientResult.data).catch((e) => console.log('bot payment error:', e))
-					if (resolveBrandName() === 'KAS' && clientResult.data.telegram?.id) {
+					if (resolveBrandName() === 'KAS' && this.clientHasBot(clientResult.data)) {
 						await this.botService.sendPaymentToClient(payment, clientResult.data).catch((e) => console.log('bot payment client error:', e))
 					}
 				}
@@ -773,7 +777,7 @@ export class SellingService {
 					products: updatedSelling.products.map((p) => ({ ...p, status: BotSellingProductTitleEnum.new })),
 				} as any
 
-				if ((body.send || resolveBrandName() === 'KAS') && clientResult.data.telegram?.id) {
+				if ((body.send || resolveBrandName() === 'KAS') && this.clientHasBot(clientResult.data)) {
 					await this.botService.sendSellingToClient(sellingInfo).catch((e) => console.log('bot client error:', e))
 				}
 
@@ -791,7 +795,7 @@ export class SellingService {
 
 				if (shouldSendPayment) {
 					await this.botService.sendPaymentToChannel(payment, isModified, clientResult.data).catch((e) => console.log('bot payment error:', e))
-					if (resolveBrandName() === 'KAS' && clientResult.data.telegram?.id) {
+					if (resolveBrandName() === 'KAS' && this.clientHasBot(clientResult.data)) {
 						await this.botService.sendPaymentToClient(payment, clientResult.data).catch((e) => console.log('bot payment client error:', e))
 					}
 				}
@@ -836,13 +840,13 @@ export class SellingService {
 				} as any
 
 				await this.botService.sendDeletedSellingToChannel(sellingInfo).catch((e) => console.log('bot channel error:', e))
-				if (resolveBrandName() === 'KAS' && clientResult.data.telegram?.id) {
+				if (resolveBrandName() === 'KAS' && this.clientHasBot(clientResult.data)) {
 					await this.botService.sendDeletedSellingToClient(sellingInfo).catch((e) => console.log('bot client error:', e))
 				}
 
 				if ((payment?.paymentMethods?.length ?? 0) > 0 || (payment?.changeMethods?.length ?? 0) > 0) {
 					await this.botService.sendDeletedPaymentToChannel(payment, clientResult.data).catch((e) => console.log('bot payment error:', e))
-					if (resolveBrandName() === 'KAS' && clientResult.data.telegram?.id) {
+					if (resolveBrandName() === 'KAS' && this.clientHasBot(clientResult.data)) {
 						await this.botService.sendDeletedPaymentToClient(payment, clientResult.data).catch((e) => console.log('bot payment client error:', e))
 					}
 				}

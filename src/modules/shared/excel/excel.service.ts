@@ -37,6 +37,7 @@ export class ExcelService {
 			OR: [
 				{ fullname: { contains: word, mode: Prisma.QueryMode.insensitive } },
 				{ phone: { contains: word, mode: Prisma.QueryMode.insensitive } },
+				{ phone2: { contains: word, mode: Prisma.QueryMode.insensitive } },
 				{ description: { contains: word, mode: Prisma.QueryMode.insensitive } },
 			],
 		})
@@ -767,12 +768,17 @@ export class ExcelService {
 		const clients = await this.prisma.clientModel.findMany({
 			where: {
 				deletedAt: null,
-				OR: [{ fullname: { contains: query.search, mode: 'insensitive' } }, { phone: { contains: query.search, mode: 'insensitive' } }],
+				OR: [
+					{ fullname: { contains: query.search, mode: 'insensitive' } },
+					{ phone: { contains: query.search, mode: 'insensitive' } },
+					{ phone2: { contains: query.search, mode: 'insensitive' } },
+				],
 			},
 			select: {
 				id: true,
 				fullname: true,
 				phone: true,
+				phone2: true,
 				createdAt: true,
 				sellings: {
 					where: { status: SellingStatusEnum.accepted },
@@ -804,6 +810,7 @@ export class ExcelService {
 			{ header: '№', key: 'no', width: 5 },
 			{ header: 'ФИО', key: 'fullname', width: 35 },
 			{ header: 'Телефон', key: 'phone', width: 20 },
+			{ header: 'Телефон 2', key: 'phone2', width: 20 },
 			{ header: 'Долг', key: 'debt', width: 30 },
 			{ header: 'Последняя продажа', key: 'lastSale', width: 25 },
 			{ header: 'Зарегистрирован', key: 'createdAt', width: 25 },
@@ -844,6 +851,7 @@ export class ExcelService {
 				no: index + 1,
 				fullname: c.fullname,
 				phone: c.phone,
+				phone2: c.phone2,
 				debt: debtStr,
 				lastSale: c.sellings[0] ? this.formatDate(c.sellings[0].date) : '',
 				createdAt: this.formatDate(c.createdAt),

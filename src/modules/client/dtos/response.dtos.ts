@@ -111,6 +111,9 @@ export class ClientReportSummaryDto implements ClientReportSummary {
 }
 
 export class ClientFindOneDataDto extends PickType(ClientRequiredDto, ['id', 'fullname', 'createdAt', 'phone']) implements ClientFindOneData {
+	@ApiPropertyOptional({ type: String, nullable: true })
+	phone2?: string | null
+
 	@ApiPropertyOptional({ type: String })
 	description?: string | null
 
@@ -125,6 +128,12 @@ export class ClientFindOneDataDto extends PickType(ClientRequiredDto, ['id', 'fu
 
 	@ApiPropertyOptional({ type: ClientReportSummaryDto })
 	report?: ClientReportSummary
+
+	@ApiPropertyOptional({ type: Object })
+	telegram?: { id?: string; isActive?: boolean }
+
+	@ApiPropertyOptional({ type: Object, isArray: true })
+	telegrams?: Array<{ id?: string; isActive?: boolean }>
 }
 
 export class ClientFindManyDataDto extends PaginationResponseDto implements ClientFindManyData {

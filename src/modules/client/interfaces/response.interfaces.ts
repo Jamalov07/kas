@@ -69,11 +69,13 @@ export declare interface ClientReportSummary {
 }
 
 export declare interface ClientFindOneData extends Pick<ClientRequired, 'id' | 'fullname' | 'createdAt' | 'phone'> {
+	phone2?: string | null
 	description?: string | null
 	debtByCurrency?: ClientDebtByCurrency[]
 	lastSellingDate?: Date
 	deedInfo?: ClientDeedInfo
 	telegram?: { id?: string; isActive?: boolean }
+	telegrams?: Array<{ id?: string; isActive?: boolean }>
 	/** Faqat `findManyForReport` */
 	report?: ClientReportSummary
 }

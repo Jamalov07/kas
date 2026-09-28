@@ -153,7 +153,9 @@ export class PdfService {
 							width: '*',
 							stack: [
 								{ text: `Xaridor: ${selling.client?.fullname ?? ''}`, fontSize: 12, margin: [0, 4, 0, 4] },
-								selling.client?.phone ? { text: `Telefon raqami: ${selling.client?.phone ?? ''}`, fontSize: 12, margin: [0, 4, 0, 4] } : undefined,
+								selling.client?.phone || selling.client?.phone2
+									? { text: `Telefon raqami: ${[selling.client?.phone, selling.client?.phone2].filter(Boolean).join(' / ')}`, fontSize: 12, margin: [0, 4, 0, 4] }
+									: undefined,
 								{ text: `Sotuv vaqti: ${this.formatDate(selling.date)}`, fontSize: 12 },
 							],
 							margin: [0, 10, 0, 0],
@@ -236,7 +238,7 @@ export class PdfService {
 	}
 
 	async generateKasInvoicePdfBuffer(selling: SellingFindOneData): Promise<Buffer> {
-		const buyerLine = [selling.publicId, selling.client?.fullname, selling.client?.phone].filter(Boolean).join(' ')
+		const buyerLine = [selling.publicId, selling.client?.fullname, selling.client?.phone, selling.client?.phone2].filter(Boolean).join(' ')
 		const oldDebtLines = this.kasMoneyRowsStackRight(selling.clientDebtBeforeSelling as SellingDebtByCurrencyRow[] | undefined)
 		const newDebtBlock = this.kasMoneyRowsStackRight(
 			(selling.clientDebtAfterSelling ?? selling.client?.debtByCurrency) as SellingDebtByCurrencyRow[] | undefined,

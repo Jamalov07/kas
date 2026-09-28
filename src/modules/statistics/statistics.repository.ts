@@ -511,13 +511,19 @@ export class StatisticsRepository {
 	async findManyClientReport(query: StatisticsClientReportRequest): Promise<{ data: ClientReportRow[]; totalCount?: number; pagesCount?: number; pageSize?: number }> {
 		const dateFilter = query.startDate || query.endDate ? { gte: query.startDate, lte: query.endDate } : undefined
 		const searchWhere = query.search
-			? { OR: [{ fullname: { contains: query.search, mode: 'insensitive' as const } }, { phone: { contains: query.search, mode: 'insensitive' as const } }] }
+			? {
+					OR: [
+						{ fullname: { contains: query.search, mode: 'insensitive' as const } },
+						{ phone: { contains: query.search, mode: 'insensitive' as const } },
+						{ phone2: { contains: query.search, mode: 'insensitive' as const } },
+					],
+				}
 			: {}
 
 		// 1. Get all clients (sorted by latest selling date desc)
 		const clients = await this.prisma.clientModel.findMany({
 			where: { deletedAt: null, ...searchWhere },
-			select: { id: true, fullname: true, phone: true, createdAt: true, telegram: { select: { id: true } } },
+			select: { id: true, fullname: true, phone: true, phone2: true, createdAt: true, telegrams: { select: { id: true } } },
 			orderBy: { createdAt: 'desc' },
 		})
 
@@ -625,10 +631,12 @@ export class StatisticsRepository {
 			}))
 
 		const rows: ClientReportRow[] = clients.map((client) => {
+			const { telegrams, ...clientRow } = client
+			const mappedClient = { ...clientRow, telegram: telegrams[0] ?? null }
 			const raw = calcMap.get(client.id)
 			if (!raw) {
 				return {
-					...client,
+					...mappedClient,
 					calc: {
 						selling: { count: 0, totalPriceByCurrency: [], paymentCount: 0, paymentByCurrency: [] },
 						clientPayment: { count: 0, totalByCurrency: [] },
@@ -663,7 +671,7 @@ export class StatisticsRepository {
 				debtByCurrency: toArr(debtMap),
 			}
 
-			return { ...client, calc }
+			return { ...mappedClient, calc }
 		})
 
 		const debtCurrencyIdsForRates = new Set<string>()

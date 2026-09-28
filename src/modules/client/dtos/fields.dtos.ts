@@ -30,6 +30,11 @@ export class ClientOptionalDto extends DefaultOptionalFieldsDto implements Clien
 
 	@ApiPropertyOptional({ type: String })
 	@IsOptional()
+	@IsPhoneNumber('UZ')
+	phone2?: string
+
+	@ApiPropertyOptional({ type: String })
+	@IsOptional()
 	@IsString()
 	description?: string
 }

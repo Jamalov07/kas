@@ -219,7 +219,7 @@ export class ClientPaymentService {
 		try {
 			const clientResult = await this.clientService.findOne({ id: payment.client.id })
 			await this.botService.sendClientPaymentToChannel(payment, false, clientResult.data.debtByCurrency ?? []).catch(console.log)
-			if (resolveBrandName() === 'KAS' && clientResult.data.telegram?.id) {
+			if ((resolveBrandName() === 'KAS' && clientResult.data.telegram?.id) || clientResult.data.telegrams?.some((t) => t?.id)) {
 				await this.botService.sendClientPaymentToClient(payment, false, clientResult.data).catch(console.log)
 			}
 		} catch (e) {
@@ -237,7 +237,7 @@ export class ClientPaymentService {
 		try {
 			const clientResult = await this.clientService.findOne({ id: updatedPayment.client.id })
 			await this.botService.sendClientPaymentToChannel(updatedPayment, true, clientResult.data.debtByCurrency ?? []).catch(console.log)
-			if (resolveBrandName() === 'KAS' && clientResult.data.telegram?.id) {
+			if ((resolveBrandName() === 'KAS' && clientResult.data.telegram?.id) || clientResult.data.telegrams?.some((t) => t?.id)) {
 				await this.botService.sendClientPaymentToClient(updatedPayment, true, clientResult.data).catch(console.log)
 			}
 		} catch (e) {
@@ -258,7 +258,7 @@ export class ClientPaymentService {
 		try {
 			const clientResult = await this.clientService.findOne({ id: existing.client.id })
 			await this.botService.sendDeletedClientPaymentToChannel(existing, clientResult.data.debtByCurrency ?? []).catch(console.log)
-			if (resolveBrandName() === 'KAS' && clientResult.data.telegram?.id) {
+			if ((resolveBrandName() === 'KAS' && clientResult.data.telegram?.id) || clientResult.data.telegrams?.some((t) => t?.id)) {
 				await this.botService.sendDeletedClientPaymentToClient(existing, clientResult.data).catch(console.log)
 			}
 		} catch (e) {

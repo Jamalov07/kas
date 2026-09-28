@@ -53,7 +53,7 @@ const SELLING_LIST_LIGHT_SELECT = {
 	createdAt: true as const,
 	updatedAt: true as const,
 	deletedAt: true as const,
-	client: { select: { id: true, fullname: true, phone: true, description: true, createdAt: true } },
+	client: { select: { id: true, fullname: true, phone: true, phone2: true, description: true, createdAt: true } },
 	staff: { select: { id: true, fullname: true, phone: true, createdAt: true } },
 	payment: { select: SELLING_PAYMENT_LIGHT_SELECT },
 	products: {
@@ -86,7 +86,7 @@ const SELLING_SELECT = {
 	createdAt: true as const,
 	updatedAt: true as const,
 	deletedAt: true as const,
-	client: { select: { id: true, fullname: true, phone: true, description: true, createdAt: true } },
+	client: { select: { id: true, fullname: true, phone: true, phone2: true, description: true, createdAt: true } },
 	staff: { select: { id: true, fullname: true, phone: true, createdAt: true } },
 	payment: { select: SELLING_PAYMENT_SELECT },
 	products: {
@@ -111,6 +111,7 @@ export class SellingRepository {
 			OR: [
 				{ fullname: { contains: word, mode: Prisma.QueryMode.insensitive } },
 				{ phone: { contains: word, mode: Prisma.QueryMode.insensitive } },
+				{ phone2: { contains: word, mode: Prisma.QueryMode.insensitive } },
 				{ description: { contains: word, mode: Prisma.QueryMode.insensitive } },
 			],
 		})
